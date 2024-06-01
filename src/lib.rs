@@ -1,6 +1,7 @@
 //! VESC communication library
 
-use std::io::{Read, Write};
+// use std::io::{Read, Write};
+use embedded_hal_nb::serial::{Read, Write};
 
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 
@@ -110,20 +111,24 @@ fn write_packet<W: Write>(payload: &[u8], w: &mut W) -> Result<(), VescErrorWith
 	let hash = crc(&payload);
 
 	// 2 for short packets and 3 for long packets
-	w.write_all(&[0x02]).map_err(|_| VescError::IoError)?;
+	w.write(0x02).map_err(|_| VescError::IoError)?;
 
 	// If payload.len() > 255, then start byte should be 3
 	// and the next two should be the length
-	w.write_all(&[payload.len() as u8])
+	w.write(payload.len() as u8)
 		.map_err(|_| VescError::IoError)?;
 
-	w.write_all(payload).map_err(|_| VescError::IoError)?;
+	for byte in payload {
+		w.write(*byte).map_err(|_| VescError::IoError)?;
+	}
 
 	// Always CRC16
-	w.write_all(&hash).map_err(|_| VescError::IoError)?;
+	for byte in &hash {
+		w.write(*byte).map_err(|_| VescError::IoError)?;
+	}
 
 	// Stop byte
-	w.write_all(&[0x03]).map_err(|_| VescError::IoError)?;
+	w.write(0x03).map_err(|_| VescError::IoError)?;
 
 	w.flush().map_err(|_| VescError::IoError)?;
 
@@ -132,15 +137,16 @@ fn write_packet<W: Write>(payload: &[u8], w: &mut W) -> Result<(), VescErrorWith
 
 // Reads a packet, checks it and returns it's payload
 fn read_packet<R: Read>(r: &mut R) -> Result<Vec<u8>, VescErrorWithBacktrace> {
-	let mut payload;
+	let mut payload = Vec::new();
 
 	// Read correct number of bytes into payload
 	{
-		let payload_len: usize = match r.read_u8().map_err(|_| VescError::IoError)? {
-			0x02 => r.read_u8().map_err(|_| VescError::IoError)? as usize,
+		let payload_len: usize = match r.read().map_err(|_| VescError::IoError)? {
+			0x02 => r.read().map_err(|_| VescError::IoError)? as usize,
 			0x03 => {
 				let mut buf = [0u8; 2];
-				r.read_exact(&mut buf).map_err(|_| VescError::IoError)?;
+				buf[0] = r.read().map_err(|_| VescError::IoError)?;
+				buf[1] = r.read().map_err(|_| VescError::IoError)?;
 				BigEndian::read_u16(&buf).into()
 			}
 			x => {
@@ -149,8 +155,9 @@ fn read_packet<R: Read>(r: &mut R) -> Result<Vec<u8>, VescErrorWithBacktrace> {
 			}
 		};
 
-		payload = vec![0u8; payload_len];
-		r.read_exact(&mut payload).map_err(|_| VescError::IoError)?;
+		for _ in 0..payload_len {
+			payload.push(r.read().map_err(|_| VescError::IoError)?);
+		}
 	}
 
 	// Check CRC
@@ -159,7 +166,10 @@ fn read_packet<R: Read>(r: &mut R) -> Result<Vec<u8>, VescErrorWithBacktrace> {
 
 		let read_hash = {
 			let mut hash: [u8; 2] = [0; 2];
-			r.read_exact(&mut hash).map_err(|_| VescError::IoError)?;
+
+			hash[0] = r.read().map_err(|_| VescError::IoError)?;
+			hash[1] = r.read().map_err(|_| VescError::IoError)?;
+
 			hash
 		};
 
@@ -169,7 +179,7 @@ fn read_packet<R: Read>(r: &mut R) -> Result<Vec<u8>, VescErrorWithBacktrace> {
 	}
 
 	// Sanity check that the last byte is the stop byte
-	if r.read_u8().map_err(|_| VescError::IoError)? != 0x03 {
+	if r.read().map_err(|_| VescError::IoError)? != 0x03 {
 		return Err(VescError::ParseError.into());
 	}
 
