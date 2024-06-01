@@ -82,21 +82,24 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 	/// Sets the forward current of the VESC
 	pub fn set_current(&mut self, val: u32) -> Result<(), VescErrorWithBacktrace> {
-		let mut payload = [0u8; 5];
-		payload[0] = Command::SetCurrent.value();
+		self._set_parameter(Command::SetCurrent, val)
+	}
 
-		BigEndian::write_u32(&mut payload[1..], val);
-
-		self.write_packet(&payload)?;
-
-		Ok(())
+	/// Sets the forward current of the VESC
+	pub fn set_rpm(&mut self, val: u32) -> Result<(), VescErrorWithBacktrace> {
+		self._set_parameter(Command::SetRpm, val)
 	}
 
 	/// Sets the duty cycle in 100ths of a percent
 	pub fn set_duty(&mut self, val: u32) -> Result<(), VescErrorWithBacktrace> {
-		let mut payload = [0u8; 5];
-		payload[0] = Command::SetDuty.value();
+		self._set_parameter(Command::SetDuty, val)
+	}
 
+	/// Set the given VESC parameter to the given value
+	fn _set_parameter(&mut self, command: Command, val: u32) -> Result<(), VescErrorWithBacktrace> {
+		let mut payload = [0u8; 5];
+
+		payload[0] = command.value();
 		BigEndian::write_u32(&mut payload[1..], val);
 
 		self.write_packet(&payload)?;
