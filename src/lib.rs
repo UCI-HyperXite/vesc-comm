@@ -3,7 +3,7 @@
 // use std::io::{Read, Write};
 use embedded_hal_nb::serial::{Read, Write};
 
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
+use byteorder::{BigEndian, ByteOrder};
 
 pub mod responses;
 
@@ -12,7 +12,7 @@ pub struct VescConnection<RW> {
 	io: RW,
 }
 
-impl<RW: Read + Write + ReadBytesExt> VescConnection<RW> {
+impl<RW: Read + Write> VescConnection<RW> {
 	/// Open a new connection with a VESC, currenly using embedded-hal Serial `Read` and `Write` traits
 	pub fn new(io: RW) -> Self {
 		VescConnection { io }
@@ -51,7 +51,7 @@ impl<RW: Read + Write + ReadBytesExt> VescConnection<RW> {
 	/// Gets various sensor data from the VESC
 	pub fn get_values(&mut self) -> Result<responses::Values, VescErrorWithBacktrace> {
 		write_packet(&[Command::GetValues.value()], &mut self.io)?;
-		self.io.read_u8().map_err(|_| VescError::IoError)?;
+		self.io.read().map_err(|_| VescError::IoError)?;
 
 		let payload = read_packet(&mut self.io)?;
 
