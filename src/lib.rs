@@ -34,7 +34,7 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 		// Longest currently defined HW_NAME is 10 characters
 		// No fixed length hence ugly reading
-		let mut hw = [0u8; 10];
+		let mut hw = [0u8; 15];
 		for i in 0..(payload.len() - 15) {
 			hw[i] = payload[3 + i];
 		}

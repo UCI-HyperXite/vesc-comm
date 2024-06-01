@@ -8,7 +8,7 @@ pub struct FwVersion {
 	/// Minor version
 	pub minor: u8,
 	/// Hardware version
-	pub hw: [u8; 10],
+	pub hw: [u8; 15],
 	/// 96 bit ID of MCU
 	pub uuid: [u8; 12],
 }
