@@ -1,38 +1,34 @@
 //! VESC communication library
 
-#![no_std]
-#![deny(missing_docs)]
+use std::io::{Read, Write};
 
-#[macro_use(block)]
-extern crate nb;
-
-use byteorder::{BigEndian, ByteOrder};
-use embedded_hal::serial::{Read, Write};
-use failure::Fail;
-use heapless::Vec;
+use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 
 pub mod responses;
 
-/// Connection to a VESC
-pub struct VescConnection<R, W> {
-	r: R,
-	w: W,
+trait ReaderWriter: Read + Write + ReadBytesExt {
+	type Error;
 }
 
-impl<R: Read<u8>, W: Write<u8>> VescConnection<R, W> {
+/// Connection to a VESC
+pub struct VescConnection<RW> {
+	io: RW,
+}
+
+impl<RW: ReaderWriter> VescConnection<RW> {
 	/// Open a new connection with a VESC, currenly using embedded-hal Serial `Read` and `Write` traits
-	pub fn new(r: R, w: W) -> Self {
-		VescConnection { r, w }
+	pub fn new(io: RW) -> Self {
+		VescConnection { io }
 	}
 
 	/// Send a command over a connection, might have a response (Need to improve this)
-	pub fn get_fw_version(&mut self) -> nb::Result<responses::FwVersion, Error> {
-		write_packet(&[Command::FwVersion.value()], &mut self.w)?;
+	pub fn get_fw_version(&mut self) -> Result<responses::FwVersion, VescErrorWithBacktrace> {
+		write_packet(&[Command::FwVersion.value()], &mut self.io)?;
 
-		let payload = read_packet(&mut self.r)?;
+		let payload = read_packet(&mut self.io)?;
 
 		if payload[0] != Command::FwVersion.value() {
-			return Err(nb::Error::Other(Error::ParseError));
+			return Err(VescError::ParseError.into());
 		}
 
 		let mut uuid = [0u8; 12];
@@ -56,13 +52,14 @@ impl<R: Read<u8>, W: Write<u8>> VescConnection<R, W> {
 	}
 
 	/// Gets various sensor data from the VESC
-	pub fn get_values(&mut self) -> nb::Result<responses::Values, Error> {
-		write_packet(&[Command::GetValues.value()], &mut self.w)?;
+	pub fn get_values(&mut self) -> Result<responses::Values, VescErrorWithBacktrace> {
+		write_packet(&[Command::GetValues.value()], &mut self.io)?;
+		self.io.read_u8().map_err(|_| VescError::IoError)?;
 
-		let payload = read_packet(&mut self.r)?;
+		let payload = read_packet(&mut self.io)?;
 
 		if payload[0] != Command::GetValues.value() {
-			return Err(nb::Error::Other(Error::ParseError));
+			return Err(VescError::ParseError.into());
 		}
 
 		Ok(responses::Values {
@@ -88,79 +85,76 @@ impl<R: Read<u8>, W: Write<u8>> VescConnection<R, W> {
 	}
 
 	/// Sets the forward current of the VESC
-	pub fn set_current(&mut self, val: u32) -> nb::Result<(), Error> {
+	pub fn set_current(&mut self, val: u32) -> Result<(), VescErrorWithBacktrace> {
 		let mut payload = [0u8; 5];
 		payload[0] = Command::SetCurrent.value();
 
 		BigEndian::write_u32(&mut payload[1..], val);
 
-		write_packet(&payload, &mut self.w)?;
+		write_packet(&payload, &mut self.io)?;
 
 		Ok(())
 	}
 
 	/// Sets the duty cycle in 100ths of a percent
-	pub fn set_duty(&mut self, val: u32) -> nb::Result<(), Error> {
+	pub fn set_duty(&mut self, val: u32) -> Result<(), VescErrorWithBacktrace> {
 		let mut payload = [0u8; 5];
 		payload[0] = Command::SetDuty.value();
 
 		BigEndian::write_u32(&mut payload[1..], val);
 
-		write_packet(&payload, &mut self.w)?;
+		write_packet(&payload, &mut self.io)?;
 
 		Ok(())
 	}
 }
 
 // Constructs a packet from a payload (adds start/stop bytes, length and CRC)
-fn write_packet<W: Write<u8>>(payload: &[u8], w: &mut W) -> nb::Result<(), Error> {
+fn write_packet<W: Write>(payload: &[u8], w: &mut W) -> Result<(), VescErrorWithBacktrace> {
 	let hash = crc(&payload);
 
 	// 2 for short packets and 3 for long packets
-	block!(w.write(0x02)).ok();
+	w.write_all(&[0x02]).map_err(|_| VescError::IoError)?;
 
 	// If payload.len() > 255, then start byte should be 3
 	// and the next two should be the length
-	block!(w.write(payload.len() as u8)).ok();
+	w.write_all(&[payload.len() as u8])
+		.map_err(|_| VescError::IoError)?;
 
-	for byte in payload {
-		block!(w.write(*byte)).ok();
-	}
+	w.write_all(payload).map_err(|_| VescError::IoError)?;
 
 	// Always CRC16
-	for byte in &hash {
-		block!(w.write(*byte)).ok();
-	}
+	w.write_all(&hash).map_err(|_| VescError::IoError)?;
 
 	// Stop byte
-	block!(w.write(0x03)).ok();
+	w.write_all(&[0x03]).map_err(|_| VescError::IoError)?;
+
+	w.flush().map_err(|_| VescError::IoError)?;
 
 	Ok(())
 }
 
 // Reads a packet, checks it and returns it's payload
-fn read_packet<R: Read<u8>>(r: &mut R) -> nb::Result<Vec<u8, 128>, Error> {
-	let mut payload = Vec::new();
+fn read_packet<R: Read>(r: &mut R) -> Result<Vec<u8>, VescErrorWithBacktrace> {
+	let mut payload;
 
 	// Read correct number of bytes into payload
 	{
-		let payload_len: usize = match block!(r.read()).ok().unwrap() {
-			0x02 => block!(r.read()).ok().unwrap().into(),
+		let payload_len: usize = match r.read_u8().map_err(|_| VescError::IoError)? {
+			0x02 => r.read_u8().map_err(|_| VescError::IoError)? as usize,
 			0x03 => {
 				let mut buf = [0u8; 2];
-				buf[0] = block!(r.read()).ok().unwrap();
-				buf[1] = block!(r.read()).ok().unwrap();
-
+				r.read_exact(&mut buf).map_err(|_| VescError::IoError)?;
 				BigEndian::read_u16(&buf).into()
 			}
-			_ => {
-				return Err(nb::Error::Other(Error::IoError));
+			x => {
+				println!("b {x} {}", u8::reverse_bits(x));
+				return Err(VescError::IoError.into());
 			}
 		};
 
-		for _ in 0..payload_len {
-			payload.push(block!(r.read()).ok().unwrap()).unwrap();
-		}
+		payload = vec![0u8; payload_len];
+		r.read_exact(&mut payload).map_err(|_| VescError::IoError)?;
 	}
 
 	// Check CRC
@@ -169,21 +163,18 @@ fn read_packet<R: Read<u8>>(r: &mut R) -> nb::Result<Vec<u8, 128>, Error> {
 
 		let read_hash = {
 			let mut hash: [u8; 2] = [0; 2];
-
-			hash[0] = block!(r.read()).ok().unwrap();
-			hash[1] = block!(r.read()).ok().unwrap();
-
+			r.read_exact(&mut hash).map_err(|_| VescError::IoError)?;
 			hash
 		};
 
 		if calculated_hash != read_hash {
-			return Err(nb::Error::Other(Error::ChecksumError));
+			return Err(VescError::ChecksumError.into());
 		}
 	}
 
 	// Sanity check that the last byte is the stop byte
-	if block!(r.read()).ok().unwrap() != 0x03 {
-		return Err(nb::Error::Other(Error::ParseError));
+	if r.read_u8().map_err(|_| VescError::IoError)? != 0x03 {
+		return Err(VescError::ParseError.into());
 	}
 
 	Ok(payload)
@@ -200,18 +191,50 @@ fn crc(payload: &[u8]) -> [u8; 2] {
 }
 
 /// Errors returned if a command fails
-#[derive(Fail, Debug)]
-pub enum Error {
+#[derive(Debug)]
+pub enum VescError {
 	/// Error occured during IO
-	#[fail(display = "Error occured during IO")]
 	IoError,
 	/// Checksum mismatch
-	#[fail(display = "Checksum mismatch")]
 	ChecksumError,
 	/// Error occured during parsing
-	#[fail(display = "Error occured during parsing")]
 	ParseError,
 }
+
+/// stub
+#[derive(Debug)]
+pub struct VescErrorWithBacktrace {
+	pub error: VescError,
+	pub backtrace: std::backtrace::Backtrace,
+}
+
+impl From<VescError> for VescErrorWithBacktrace {
+	fn from(error: VescError) -> Self {
+		Self {
+			error,
+			backtrace: std::backtrace::Backtrace::capture(),
+		}
+	}
+}
+
+impl std::fmt::Display for VescErrorWithBacktrace {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}\n\n{}", self.error, self.backtrace)
+	}
+}
+
+impl std::fmt::Display for VescError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			VescError::IoError => write!(f, "Error occurred during IO"),
+			VescError::ChecksumError => write!(f, "Checksum mismatch"),
+			VescError::ParseError => write!(f, "Error occured during parsing"),
+		}
+	}
+}
+
+// impl std::error::Error for VescError {}
+// impl std::error::Error for VescErrorWithBacktrace {}
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -310,7 +333,7 @@ impl responses::Fault {
 	}
 	*/
 
-	fn from_u8(n: u8) -> Result<Self, crate::Error> {
+	fn from_u8(n: u8) -> Result<Self, crate::VescErrorWithBacktrace> {
 		match n {
 			0 => Ok(responses::Fault::None),
 			1 => Ok(responses::Fault::OverVoltage),
@@ -319,7 +342,7 @@ impl responses::Fault {
 			4 => Ok(responses::Fault::AbsOverCurrent),
 			5 => Ok(responses::Fault::OverTempFet),
 			6 => Ok(responses::Fault::OverTempMotor),
-			_ => Err(crate::Error::ParseError),
+			_ => Err(crate::VescError::ParseError.into()),
 		}
 	}
 }
