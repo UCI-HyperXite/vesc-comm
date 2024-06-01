@@ -19,7 +19,7 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 	/// Send a command over a connection, might have a response (Need to improve this)
 	pub fn get_fw_version(&mut self) -> Result<responses::FwVersion, VescErrorWithBacktrace> {
-		Self::write_packet(&[Command::FwVersion.value()], &mut self.io)?;
+		self.write_packet(&[Command::FwVersion.value()])?;
 
 		let payload = self.read_packet()?;
 
@@ -49,7 +49,7 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 	/// Gets various sensor data from the VESC
 	pub fn get_values(&mut self) -> Result<responses::Values, VescErrorWithBacktrace> {
-		Self::write_packet(&[Command::GetValues.value()], &mut self.io)?;
+		self.write_packet(&[Command::GetValues.value()])?;
 		self.io.read().map_err(|_| VescError::IoError)?;
 
 		let payload = self.read_packet()?;
@@ -87,7 +87,7 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 		BigEndian::write_u32(&mut payload[1..], val);
 
-		Self::write_packet(&payload, &mut self.io)?;
+		self.write_packet(&payload)?;
 
 		Ok(())
 	}
@@ -99,7 +99,7 @@ impl<RW: Read + Write> VescConnection<RW> {
 
 		BigEndian::write_u32(&mut payload[1..], val);
 
-		Self::write_packet(&payload, &mut self.io)?;
+		self.write_packet(&payload)?;
 
 		Ok(())
 	}
@@ -160,32 +160,35 @@ impl<RW: Read + Write> VescConnection<RW> {
 	}
 
 	// Constructs a packet from a payload (adds start/stop bytes, length and CRC)
-	fn write_packet<W: Write>(payload: &[u8], w: &mut W) -> Result<(), VescErrorWithBacktrace> {
+	fn write_packet(&mut self, payload: &[u8]) -> Result<(), VescErrorWithBacktrace> {
 		let hash = crc(&payload);
 
 		// 2 for short packets and 3 for long packets
-		w.write(0x02).map_err(|_| VescError::IoError)?;
+		self.write(0x02)?;
 
 		// If payload.len() > 255, then start byte should be 3
 		// and the next two should be the length
-		w.write(payload.len() as u8)
-			.map_err(|_| VescError::IoError)?;
+		self.write(payload.len() as u8)?;
 
 		for byte in payload {
-			w.write(*byte).map_err(|_| VescError::IoError)?;
+			self.write(*byte)?;
 		}
 
 		// Always CRC16
 		for byte in &hash {
-			w.write(*byte).map_err(|_| VescError::IoError)?;
+			self.write(*byte)?;
 		}
 
 		// Stop byte
-		w.write(0x03).map_err(|_| VescError::IoError)?;
+		self.write(0x03)?;
 
-		w.flush().map_err(|_| VescError::IoError)?;
+		self.io.flush().map_err(|_| VescError::IoError)?;
 
 		Ok(())
+	}
+
+	fn write(&mut self, payload: u8) -> Result<(), VescError> {
+		block!(self.io.write(payload)).map_err(|_| VescError::IoError)
 	}
 }
 
