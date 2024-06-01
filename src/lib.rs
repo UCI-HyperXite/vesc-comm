@@ -6,16 +6,12 @@ use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 
 pub mod responses;
 
-trait ReaderWriter: Read + Write + ReadBytesExt {
-	type Error;
-}
-
 /// Connection to a VESC
 pub struct VescConnection<RW> {
 	io: RW,
 }
 
-impl<RW: ReaderWriter> VescConnection<RW> {
+impl<RW: Read + Write + ReadBytesExt> VescConnection<RW> {
 	/// Open a new connection with a VESC, currenly using embedded-hal Serial `Read` and `Write` traits
 	pub fn new(io: RW) -> Self {
 		VescConnection { io }
